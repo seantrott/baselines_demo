@@ -1,0 +1,282 @@
+---
+title: "Baselines Example"
+author: "Anonymous authors"
+date: "9-8-2025"
+output:
+  html_document:
+    keep_md: yes
+    toc: yes
+    toc_float: yes
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(dpi = 300, fig.format = "png")
+```
+
+
+# Setup
+
+Load libraries
+
+```{r setup}
+library(tidyverse)
+library(lme4)
+library(broom.mixed)
+library(lmerTest)
+```
+
+
+# Example 1: Simulated data
+
+Here, we simulate data from a hypothetical experiment manipulating a `condition` and measuring variance in `rt`; we also measure the `surprisal` associated with each stimulus. We then apply the baselines method.
+
+## Simulate data
+
+We assume that variance in `rt` is correlated with variance in `surprisal` and the experimental `condition`. Specifically, we assume the following causal structure:
+
+- variance in `condition` is associated with variance in `surprisal`. 
+- variance in `rt` is the result of both variance in `condition` and `surprisal`. 
+- each subject and item shows some variance in these effects.
+
+The parameters (and causal structure) of this simulation could be adjusted to model different kinds of relationships.
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Can change these to vary number of subjects/items
+n_subjects <- 40
+n_items <- 20
+# Example condition labels
+conditions <- c("High", "Low")
+
+# Effect parameters
+INTERCEPT = 600
+BETA_CONDITION = 30
+BETA_SURPRISAL = 15
+
+# General all the data
+df_sim <- expand_grid(
+  subject = 1:n_subjects,
+  item = 1:n_items,
+  condition = conditions
+) %>%
+  mutate(
+    # Create binary condition variable, necessary for simulating data
+    condition_binary = ifelse(condition == "High", 1, 0),
+    
+    # Generate surprisal data (generated from *condition* with noise)
+    surprisal = ifelse(condition == "High", 
+                      rnorm(n(), mean = 4.0, sd = 1.0),  # Higher surprisal for High condition
+                      rnorm(n(), mean = 2.5, sd = 1.0)) + # Lower surprisal for Low condition
+                rnorm(n(), 0, 0.5), # Additional noise
+    surprisal = pmax(surprisal, 0.1), # Ensure positive values
+    
+    # Random effects
+    subj_intercept = rep(rnorm(n_subjects, 0, 50), each = n_items * 2)[1:n()],
+    subj_condition_slope = rep(rnorm(n_subjects, 0, 20), each = n_items * 2)[1:n()],
+    item_intercept = rep(rnorm(n_items, 0, 30), times = n_subjects * 2)[1:n()],
+    
+    # Generate RT with fixed and random effects
+    rt = INTERCEPT +                                    # Baseline RT
+         BETA_CONDITION * condition_binary +                  # Condition effect (High condition slower)
+         BETA_SURPRISAL * surprisal +                         # Surprisal effect
+         subj_intercept +                         # Subject random intercept
+         subj_condition_slope * condition_binary + # Subject random slope for condition
+         item_intercept +                         # Item random intercept
+         rnorm(n(), 0, 40)                        # Residual noise
+  ) %>%
+  select(subject, item, condition, condition_binary, surprisal, rt)
+
+cat("Simulated", nrow(df_sim), "observations\n")
+cat("Design: 40 subjects × 20 items × 2 conditions\n\n")
+```
+
+## Baselines analysis
+
+```{r}
+model_full = lmer(data = df_sim,
+                  rt ~ surprisal + condition +
+                    (1 + condition | subject) + 
+                    (1 | item))
+
+model_just_condition = lmer(data = df_sim,
+                  rt ~ condition +
+                    (1 + condition | subject) + 
+                    (1 | item))
+
+model_just_surprisal = lmer(data = df_sim,
+                  rt ~ surprisal +
+                    (1 + condition | subject) + 
+                    (1 | item))
+
+
+### BASELINES ANALYSIS:
+anova(model_full, model_just_surprisal)
+
+
+### SUPPLEMENTAL ANALYSIS:
+anova(model_full, model_just_condition)
+```
+
+### Visualize coefficients
+
+Here, we visualize the coefficients to see the direction of the effects. By visualizing the coefficients from the *full* model in the same plot as those fit from individual models, we can also see the result of including each variable in the same model. 
+
+```{r}
+# Extract coefficients from all models
+df_full <- broom.mixed::tidy(model_full) %>% mutate(model = "Full")
+df_condition <- broom.mixed::tidy(model_just_condition) %>% mutate(model = "Condition")
+df_surprisal <- broom.mixed::tidy(model_just_surprisal) %>% mutate(model = "Surprisal")
+
+# Combine all model results
+df_all_models <- bind_rows(df_full, df_condition, df_surprisal)
+
+df_all_models %>%
+  filter(term != "(Intercept)") %>%
+  filter(effect == "fixed") %>%
+  ggplot(aes(x = reorder(term, estimate),
+             y = estimate,
+             color = model)) +
+  geom_point(position = position_dodge(width = 0.3)) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_errorbar(aes(ymin = estimate - 2*std.error, 
+                    ymax = estimate + 2*std.error), 
+                width = 0.2,
+                position = position_dodge(width = 0.3)) +
+  labs(x = "Predictor",
+       y = "Coefficient estimate",
+       title = "Model Coefficients Comparison",
+       color = "Model") +
+  theme_minimal() +
+  theme(text = element_text(size = 15),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+```
+
+# Example 2: Trott & Bergen (2023)
+
+This section uses the data from experiment 1 of [Trott & Bergen (2023)](https://pubmed.ncbi.nlm.nih.gov/36892900/) for a baselines analysis. Note that this is a simplified analysis that does not include all of the covariates in the original paper for the purpose of demonstrating the baselines method.
+
+## Load data
+
+```{r}
+### Load preprocessed data
+df_merged = read_csv("data/ambiguity_e1_data.csv")
+nrow(df_merged)
+```
+
+## Baselines anlaysis
+
+Here, we ask whether the existence of a **sense boundary** (`same`) explains variance in reaction time above and beyond the *cosine distance* (`distance_bert`) between contextualized representations of the target word in a prime sentence and a target sentence.
+
+Based on the LRT here, we would conclude that **sense boundaries** do contribute explanatory power above and beyond **cosine distance**. 
+
+```{r}
+### Filter to correct responses
+df_merged_correct = df_merged %>%
+  filter(correct_response == TRUE)
+
+# Construct full model with both variables
+model_full_rt = lmer(data = df_merged_correct,
+                  log_rt ~ distance_bert + same + 
+                    (1 + distance_bert + same | subject) +
+                    (1 | word),
+                  control=lmerControl(optimizer="bobyqa"),
+                  REML = FALSE)
+
+# Construct reduced model with only distance
+model_just_distance = lmer(data = df_merged_correct,
+                  log_rt ~ distance_bert + 
+                    (1 + distance_bert + same | subject) +
+                    (1 | word),
+                  control=lmerControl(optimizer="bobyqa"),
+                  REML = FALSE)
+
+# For comparison, construct reduced model with only same
+model_just_same = lmer(data = df_merged_correct,
+                  log_rt ~ same + 
+                    (1 + distance_bert + same | subject) +
+                    (1 | word),
+                  control=lmerControl(optimizer="bobyqa"),
+                  REML = FALSE)
+
+# BASELINES ANALYSIS: compare full to reduced model
+anova(model_full_rt, model_just_distance)
+
+
+# SUPPELMENTAL ANALYSIS: does distance explain unique varianc too?
+anova(model_full_rt, model_just_same)
+
+
+```
+
+### Visualize coefficients
+
+Here, we visualize the coefficients to see the direction of the effects. By visualizing the coefficients from the *full* model in the same plot as those fit from individual models, we can also see the result of including each variable in the same model. 
+
+```{r}
+# Extract coefficients from all models
+df_full <- broom.mixed::tidy(model_full_rt) %>% mutate(model = "Full")
+df_same <- broom.mixed::tidy(model_just_same) %>% mutate(model = "Sense Boundary")
+df_distance <- broom.mixed::tidy(model_just_distance) %>% mutate(model = "Distance")
+
+# Combine all model results
+df_all_models <- bind_rows(df_full, df_same, df_distance)
+
+
+df_all_models = df_all_models %>%
+  mutate(term_modified = case_when(
+    term == "sameTRUE" ~ "Sense Boundary (True)",
+    term == "distance_bert" ~ "Cosine Distance"
+  ))
+
+
+df_all_models %>%
+  filter(term != "(Intercept)") %>%
+  filter(effect == "fixed") %>%
+  ggplot(aes(x = reorder(term_modified, estimate),
+             y = estimate,
+             color = model)) +
+  geom_point(position = position_dodge(width = 0.3)) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_errorbar(aes(ymin = estimate - 2*std.error, 
+                    ymax = estimate + 2*std.error), 
+                width = 0.2,
+                position = position_dodge(width = 0.3)) +
+  labs(x = "Predictor",
+       y = "Coefficient estimate",
+       title = "Model Coefficients Comparison",
+       color = "Model") +
+  theme_minimal() +
+  theme(text = element_text(size = 15),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+```
+
+### AIC Comparison
+
+Although our focus is on using likelihood-ratio tests to compare a full and reduced model, other model selection techniques such as AIC can also be used to compare models.
+
+```{r}
+
+### Compare AIC as well
+df_aic = data.frame(Model = c("Full", "Sense Boundary", "Distance"),
+                    AIC = c(AIC(model_full_rt), 
+                            AIC(model_just_same), 
+                            AIC(model_just_distance)))
+df_aic$aic_rescaled = df_aic$AIC - min(df_aic$AIC)
+
+ggplot(df_aic, aes(x = reorder(Model, aic_rescaled), y = aic_rescaled)) +
+  geom_col(fill = "steelblue") +
+  labs(title = "AIC Comparison Across Models",
+       x = "Model",
+       y = "AIC (Rescaled to Full)") +
+  theme_minimal() +
+  theme(text = element_text(size = 15),
+        legend.position="bottom")
+
+```
+
